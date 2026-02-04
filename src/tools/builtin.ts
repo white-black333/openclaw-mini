@@ -22,9 +22,10 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { exec as execCallback } from "node:child_process";
+import { exec as execCallback, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Tool, ToolContext } from "./types.js";
+import { assertSandboxPath } from "../sandbox-paths.js";
 
 const execAsync = promisify(execCallback);
 
@@ -55,8 +56,18 @@ export const readTool: Tool<{ file_path: string; limit?: number }> = {
     required: ["file_path"],
   },
   async execute(input, ctx) {
-    // 安全: 使用 path.resolve 确保路径在 workspaceDir 内
-    const filePath = path.resolve(ctx.workspaceDir, input.file_path);
+    // 安全: 确保路径在 workspaceDir 内，并拒绝符号链接逃逸
+    let filePath: string;
+    try {
+      const resolved = await assertSandboxPath({
+        filePath: input.file_path,
+        cwd: ctx.workspaceDir,
+        root: ctx.workspaceDir,
+      });
+      filePath = resolved.resolved;
+    } catch (err) {
+      return `错误: ${(err as Error).message}`;
+    }
     const limit = input.limit ?? 500;
 
     try {
@@ -96,7 +107,17 @@ export const writeTool: Tool<{ file_path: string; content: string }> = {
     required: ["file_path", "content"],
   },
   async execute(input, ctx) {
-    const filePath = path.resolve(ctx.workspaceDir, input.file_path);
+    let filePath: string;
+    try {
+      const resolved = await assertSandboxPath({
+        filePath: input.file_path,
+        cwd: ctx.workspaceDir,
+        root: ctx.workspaceDir,
+      });
+      filePath = resolved.resolved;
+    } catch (err) {
+      return `错误: ${(err as Error).message}`;
+    }
 
     try {
       // 自动创建父目录
@@ -144,7 +165,17 @@ export const editTool: Tool<{
     required: ["file_path", "old_string", "new_string"],
   },
   async execute(input, ctx) {
-    const filePath = path.resolve(ctx.workspaceDir, input.file_path);
+    let filePath: string;
+    try {
+      const resolved = await assertSandboxPath({
+        filePath: input.file_path,
+        cwd: ctx.workspaceDir,
+        root: ctx.workspaceDir,
+      });
+      filePath = resolved.resolved;
+    } catch (err) {
+      return `错误: ${(err as Error).message}`;
+    }
 
     try {
       const content = await fs.readFile(filePath, "utf-8");
@@ -245,7 +276,17 @@ export const listTool: Tool<{ path?: string; pattern?: string }> = {
     },
   },
   async execute(input, ctx) {
-    const dirPath = path.resolve(ctx.workspaceDir, input.path ?? ".");
+    let dirPath: string;
+    try {
+      const resolved = await assertSandboxPath({
+        filePath: input.path ?? ".",
+        cwd: ctx.workspaceDir,
+        root: ctx.workspaceDir,
+      });
+      dirPath = resolved.resolved;
+    } catch (err) {
+      return `错误: ${(err as Error).message}`;
+    }
 
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -304,25 +345,102 @@ export const grepTool: Tool<{ pattern: string; path?: string }> = {
     required: ["pattern"],
   },
   async execute(input, ctx) {
-    const searchPath = path.resolve(ctx.workspaceDir, input.path ?? ".");
-
     try {
-      // grep 参数说明:
-      // -r: 递归搜索
-      // -n: 显示行号
-      // --include: 只搜索指定扩展名的文件
-      // head -50: 只返回前 50 条结果
-      const { stdout } = await execAsync(
-        `grep -rn --include="*.ts" --include="*.js" --include="*.json" --include="*.md" "${input.pattern}" "${searchPath}" | head -50`,
-        { cwd: ctx.workspaceDir, timeout: 10000 },
-      );
-      return stdout || "未找到匹配";
-    } catch {
-      // grep 没找到匹配时会返回非零退出码，这不是错误
-      return "未找到匹配";
+      const resolved = await assertSandboxPath({
+        filePath: input.path ?? ".",
+        cwd: ctx.workspaceDir,
+        root: ctx.workspaceDir,
+      });
+      const searchPath = resolved.resolved;
+
+      const output = await runRipgrep({
+        cwd: ctx.workspaceDir,
+        pattern: input.pattern,
+        searchPath,
+        timeoutMs: 10000,
+        limit: 100,
+      });
+
+      return output || "未找到匹配";
+    } catch (err) {
+      return `错误: ${(err as Error).message}`;
     }
   },
 };
+
+async function runRipgrep(params: {
+  cwd: string;
+  pattern: string;
+  searchPath: string;
+  timeoutMs: number;
+  limit: number;
+}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "--line-number",
+      "--color=never",
+      "--hidden",
+      "--no-messages",
+    ];
+    args.push(params.pattern, params.searchPath);
+
+    const child = spawn("rg", args, {
+      cwd: params.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      settle(() => reject(new Error("rg 超时")));
+    }, params.timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      settle(() => reject(error));
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code && code !== 0 && code !== 1) {
+        const message = stderr.trim() || `rg exited with code ${code}`;
+        settle(() => reject(new Error(message)));
+        return;
+      }
+      const lines = stdout.split("\n").filter((line) => line.trim());
+      const limited = lines.slice(0, Math.max(1, params.limit));
+      let output = limited.join("\n");
+      if (lines.length > params.limit) {
+        output += `\n\n[已截断，仅显示前 ${params.limit} 条匹配]`;
+      }
+      if (output.length > 30000) {
+        output = `${output.slice(0, 30000)}\n\n[输出过长已截断]`;
+      }
+      settle(() => resolve(output));
+    });
+  });
+}
 
 // ============== 记忆工具 ==============
 

@@ -18,10 +18,11 @@ while tool_calls:
 
 **这不是真正的 Agent 架构。** 一个生产级 Agent 需要的是"系统级最佳实践"。
 
-OpenClaw 是一个 5 万行的生产级 Agent 系统，本项目从中提炼出 **~800 行核心代码**，帮助你理解：
+OpenClaw 是一个80w行的复杂Agent 系统，本项目从中提炼出核心设计与最小实现，帮助你理解：
 
 - 为什么需要长期记忆？
 - 如何实现按需上下文加载？
+- 如何做上下文管理与压缩（裁剪 + 摘要）？
 - 技能系统怎么设计才能扩展？
 - 主动唤醒机制的真实实现是什么？
 
@@ -30,7 +31,7 @@ OpenClaw 是一个 5 万行的生产级 Agent 系统，本项目从中提炼出 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                       OpenClaw Mini                               │
-│                      (本项目 ~800 行)                             │
+│                      (本项目 · 精简核心版)                            │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐   │
@@ -288,18 +289,17 @@ private schedule(delayMs: number): void {
 
 ## 源码映射表
 
-| 本项目文件 | 行数 | OpenClaw 对应文件 | 原始规模 |
-|-----------|------|-------------------|---------|
-| `agent.ts` | ~320 | `src/agents/pi-embedded-runner/run.ts` | ~700 行 |
-| `session.ts` | ~110 | `src/agents/session-manager.ts` | ~500 行 |
-| `memory.ts` | ~170 | `src/memory/manager.ts` | 76KB |
-| `context/loader.ts` | ~150 | `src/agents/bootstrap-files.ts` | ~300 行 |
-| `context/pruning.ts` | ~220 | `src/agents/pi-extensions/context-pruning/pruner.ts` | ~450 行 |
-| `context/compaction.ts` | ~260 | `src/agents/compaction.ts` | ~380 行 |
-| `skills.ts` | ~230 | `src/agents/skills/` | ~2000 行 |
-| `heartbeat.ts` | ~400 | `src/infra/heartbeat-runner.ts`<br>`src/infra/heartbeat-wake.ts` | ~1500 行 |
-| `tools/*.ts` | ~210 | `src/tools/` | 50+ 工具 |
-| **总计** | **~800** | | **~50,000** |
+| 本项目文件 | OpenClaw 对应文件 | 说明 |
+|-----------|-------------------|------|
+| `agent.ts` | `src/agents/pi-embedded-runner/run.ts` | Agent Loop + run 生命周期 |
+| `session.ts` | `src/agents/session-manager.ts` | JSONL 会话持久化 |
+| `memory.ts` | `src/memory/manager.ts` | 记忆检索核心思路 |
+| `context/loader.ts` | `src/agents/bootstrap-files.ts` | Bootstrap 文件加载 |
+| `context/pruning.ts` | `src/agents/pi-extensions/context-pruning/pruner.ts` | 上下文裁剪 |
+| `context/compaction.ts` | `src/agents/compaction.ts` | 历史摘要压缩 |
+| `skills.ts` | `src/agents/skills/` | 技能系统 |
+| `heartbeat.ts` | `src/infra/heartbeat-runner.ts`<br>`src/infra/heartbeat-wake.ts` | 主动唤醒 |
+| `tools/*.ts` | `src/tools/` | 内置工具样例 |
 
 ---
 
@@ -375,41 +375,23 @@ agent.startHeartbeat((tasks, request) => {
 3. **对照 OpenClaw 源码**：验证简化版是否抓住了核心
 4. **尝试扩展**：添加新的技能、工具、或改进记忆检索
 
-## 与 OpenClaw 源码对照
-
-本项目位于 `examples/openclaw-mini`，可直接对照父目录的 OpenClaw 源码学习：
-
-```
-openclaw/
-├── src/
-│   ├── infra/heartbeat-runner.ts    ← 对照 examples/openclaw-mini/src/heartbeat.ts
-│   ├── infra/heartbeat-wake.ts      ← 对照 examples/openclaw-mini/src/heartbeat.ts
-│   ├── memory/manager.ts            ← 对照 examples/openclaw-mini/src/memory.ts
-│   ├── agents/bootstrap-files.ts    ← 对照 examples/openclaw-mini/src/context/loader.ts
-│   ├── agents/compaction.ts         ← 对照 examples/openclaw-mini/src/context/compaction.ts
-│   ├── agents/pi-extensions/context-pruning/pruner.ts ← 对照 examples/openclaw-mini/src/context/pruning.ts
-│   └── agents/skills/               ← 对照 examples/openclaw-mini/src/skills.ts
-└── examples/
-    └── openclaw-mini/               ← 本项目 (~800 行)
-```
-
 ## 精华设计索引（必学 4 点）
 
 1) **上下文的文件化结构**  
    - OpenClaw：`src/agents/workspace.ts`（bootstrap 文件清单）  
-   - Mini：`examples/openclaw-mini/src/context/bootstrap.ts`
+   - Mini：`openclaw-mini/src/context/bootstrap.ts`
 
 2) **统一注入链路（Project Context）**  
    - OpenClaw：`src/agents/system-prompt.ts`  
-   - Mini：`examples/openclaw-mini/src/context/loader.ts`
+   - Mini：`openclaw-mini/src/context/loader.ts`
 
 3) **规模控制（截断 + 裁剪）**  
    - OpenClaw：`src/agents/pi-embedded-helpers/bootstrap.ts` + `src/agents/pi-extensions/context-pruning/pruner.ts`  
-   - Mini：`examples/openclaw-mini/src/context/bootstrap.ts` + `examples/openclaw-mini/src/context/pruning.ts`
+   - Mini：`openclaw-mini/src/context/bootstrap.ts` + `openclaw-mini/src/context/pruning.ts`
 
 4) **压缩继承（摘要）**  
    - OpenClaw：`src/agents/compaction.ts`  
-   - Mini：`examples/openclaw-mini/src/context/compaction.ts`
+   - Mini：`openclaw-mini/src/context/compaction.ts`
 
 ## License
 

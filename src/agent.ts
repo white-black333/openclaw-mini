@@ -558,22 +558,12 @@ export class Agent {
           // 解析响应
           const assistantContent: ContentBlock[] = [];
           const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
+          const turnTextParts: string[] = [];
 
           for (const block of response.content) {
             if (block.type === "text") {
-              finalText = block.text;
-              callbacks?.onTextComplete?.(block.text);
+              turnTextParts.push(block.text);
               assistantContent.push({ type: "text", text: block.text });
-              emitAgentEvent({
-                runId,
-                stream: "assistant",
-                sessionKey,
-                agentId: this.agentId,
-                data: {
-                  text: block.text,
-                  final: true,
-                },
-              });
             } else if (block.type === "tool_use") {
               callbacks?.onToolStart?.(block.name, block.input);
               emitAgentEvent({
@@ -612,8 +602,24 @@ export class Agent {
 
           callbacks?.onTurnEnd?.(turns);
 
+          const turnText = turnTextParts.join("");
+          if (turnText) {
+            callbacks?.onTextComplete?.(turnText);
+            emitAgentEvent({
+              runId,
+              stream: "assistant",
+              sessionKey,
+              agentId: this.agentId,
+              data: {
+                text: turnText,
+                final: true,
+              },
+            });
+          }
+
           // 没有工具调用，结束
           if (toolCalls.length === 0) {
+            finalText = turnText;
             break;
           }
 

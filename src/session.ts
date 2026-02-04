@@ -109,11 +109,7 @@ export class SessionManager {
     const filePath = this.getPath(sessionKey);
     try {
       const content = await fs.readFile(filePath, "utf-8");
-      const messages = content
-        .split("\n")
-        .filter((line: string) => line.trim()) // 跳过空行
-        .map((line: string) => JSON.parse(line) as Message);
-
+      const messages = parseJsonl(content);
       // 3. 写入缓存
       this.cache.set(sessionKey, messages);
       return messages;
@@ -122,10 +118,7 @@ export class SessionManager {
       try {
         const legacyPath = this.getLegacyPath(sessionKey);
         const legacyContent = await fs.readFile(legacyPath, "utf-8");
-        const messages = legacyContent
-          .split("\n")
-          .filter((line: string) => line.trim())
-          .map((line: string) => JSON.parse(line) as Message);
+        const messages = parseJsonl(legacyContent);
         this.cache.set(sessionKey, messages);
         return messages;
       } catch {
@@ -198,9 +191,32 @@ export class SessionManager {
       const files = await fs.readdir(this.baseDir);
       return files
         .filter((f: string) => f.endsWith(".jsonl"))
-        .map((f: string) => decodeURIComponent(f.replace(".jsonl", "")));
+        .map((f: string) => {
+          try {
+            return decodeURIComponent(f.replace(".jsonl", ""));
+          } catch {
+            return f.replace(".jsonl", "");
+          }
+        });
     } catch {
       return [];
     }
   }
+}
+
+function parseJsonl(content: string): Message[] {
+  const messages: Message[] = [];
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      messages.push(JSON.parse(trimmed) as Message);
+    } catch {
+      // 跳过损坏行，尽量保留其他记录
+    }
+  }
+  return messages;
 }
