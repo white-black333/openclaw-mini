@@ -48,6 +48,8 @@ import { emitAgentEvent } from "./agent-events.js";
 export interface AgentConfig {
   /** Anthropic API Key */
   apiKey: string;
+  /** 自定义 API Base URL (兼容 ANTHROPIC_BASE_URL) */
+  baseURL?: string;
   /** 模型 ID */
   model?: string;
   /** Agent ID（默认 main） */
@@ -176,8 +178,12 @@ export class Agent {
   private enableHeartbeat: boolean;
 
   constructor(config: AgentConfig) {
-    this.client = new Anthropic({ apiKey: config.apiKey });
-    this.model = config.model ?? "claude-sonnet-4-20250514";
+    const baseURL = config.baseURL ?? process.env.ANTHROPIC_BASE_URL;
+    this.client = new Anthropic({
+      apiKey: config.apiKey,
+      baseURL: baseURL,
+    });
+    this.model = config.model ?? process.env.ANTHROPIC_MODEL ?? "claude-3-5-sonnet-20241022";
     this.agentId = normalizeAgentId(config.agentId ?? "main");
     this.baseSystemPrompt = config.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.tools = config.tools ?? builtinTools;
@@ -426,282 +432,282 @@ export class Agent {
           },
         });
         try {
-        // 加载历史
-        const history = await this.sessions.load(sessionKey);
+          // 加载历史
+          const history = await this.sessions.load(sessionKey);
 
-        let memoriesUsed = 0;
-        const toolCtx: ToolContext = {
-          workspaceDir: this.workspaceDir,
-          sessionKey,
-          sessionId: sessionIdOrKey,
-          agentId: resolveAgentIdFromSessionKey(sessionKey),
-          memory: this.enableMemory ? this.memory : undefined,
-          onMemorySearch: (results) => {
-            memoriesUsed += results.length;
-            callbacks?.onMemorySearch?.(results);
-          },
-          spawnSubagent: async ({ task, label, cleanup }) =>
-            this.spawnSubagent({
-              parentSessionKey: sessionKey,
-              task,
-              label,
-              cleanup,
-            }),
-        };
+          let memoriesUsed = 0;
+          const toolCtx: ToolContext = {
+            workspaceDir: this.workspaceDir,
+            sessionKey,
+            sessionId: sessionIdOrKey,
+            agentId: resolveAgentIdFromSessionKey(sessionKey),
+            memory: this.enableMemory ? this.memory : undefined,
+            onMemorySearch: (results) => {
+              memoriesUsed += results.length;
+              callbacks?.onMemorySearch?.(results);
+            },
+            spawnSubagent: async ({ task, label, cleanup }) =>
+              this.spawnSubagent({
+                parentSessionKey: sessionKey,
+                task,
+                label,
+                cleanup,
+              }),
+          };
 
-        let processedMessage = userMessage;
-        let skillTriggered: string | undefined;
+          let processedMessage = userMessage;
+          let skillTriggered: string | undefined;
 
-        // ===== 技能匹配 =====
-        if (this.enableSkills) {
-          const match = await this.skills.match(userMessage);
-          if (match) {
-            callbacks?.onSkillMatch?.(match);
-            skillTriggered = match.skill.id;
-            // 将技能 prompt 注入消息
-            const trigger = match.matchedTrigger || "";
-            const userPart = userMessage.slice(trigger.length).trim() || userMessage;
-            processedMessage = `${match.skill.prompt}\n\n用户请求: ${userPart}`;
-          }
-        }
-
-        // 记忆检索改为工具化调用，不在此自动注入
-
-        // ===== Heartbeat 任务注入 =====
-        if (this.enableHeartbeat) {
-          const tasksPrompt = await this.heartbeat.buildTasksPrompt();
-          if (tasksPrompt) {
-            processedMessage += tasksPrompt;
-          }
-        }
-
-        // 添加用户消息
-        const userMsg: Message = {
-          role: "user",
-          content: processedMessage,
-          timestamp: Date.now(),
-        };
-        await this.sessions.append(sessionKey, userMsg);
-
-        let turns = 0;
-        let totalToolCalls = 0;
-        let finalText = "";
-        const currentMessages = [...history, userMsg];
-        const prep = await this.prepareMessagesForRun({
-          messages: currentMessages,
-          sessionKey,
-          runId,
-        });
-        let compactionSummary = prep.summaryMessage;
-        let cachedPrune = prep.pruned;
-        let usedInitialPrune = false;
-
-        // 构建系统提示
-        const systemPrompt = await this.buildSystemPrompt({ sessionKey });
-        const toolsForRun = this.resolveToolsForRun();
-
-        // ===== Agent Loop =====
-        while (turns < this.maxTurns) {
-          turns++;
-          callbacks?.onTurnStart?.(turns);
-
-          const pruneResult = usedInitialPrune
-            ? pruneContextMessages({
-                messages: currentMessages,
-                contextWindowTokens: this.contextTokens,
-              })
-            : cachedPrune;
-          usedInitialPrune = true;
-          cachedPrune = pruneResult;
-          let messagesForModel = pruneResult.messages;
-          if (compactionSummary) {
-            messagesForModel = [compactionSummary, ...messagesForModel];
-          }
-
-          // 调用 LLM (流式)
-          const stream = this.client.messages.stream({
-            model: this.model,
-            max_tokens: 4096,
-            system: systemPrompt,
-            tools: toolsForRun.map((t) => ({
-              name: t.name,
-              description: t.description,
-              input_schema: t.inputSchema,
-            })),
-            messages: messagesForModel.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })) as Anthropic.MessageParam[],
-          });
-
-          // 处理流式响应
-          for await (const event of stream) {
-            if (event.type === "content_block_delta") {
-              if (event.delta.type === "text_delta") {
-                callbacks?.onTextDelta?.(event.delta.text);
-                emitAgentEvent({
-                  runId,
-                  stream: "assistant",
-                  sessionKey,
-                  agentId: this.agentId,
-                  data: {
-                    delta: event.delta.text,
-                  },
-                });
-              }
+          // ===== 技能匹配 =====
+          if (this.enableSkills) {
+            const match = await this.skills.match(userMessage);
+            if (match) {
+              callbacks?.onSkillMatch?.(match);
+              skillTriggered = match.skill.id;
+              // 将技能 prompt 注入消息
+              const trigger = match.matchedTrigger || "";
+              const userPart = userMessage.slice(trigger.length).trim() || userMessage;
+              processedMessage = `${match.skill.prompt}\n\n用户请求: ${userPart}`;
             }
           }
 
-          // 获取完整响应
-          const response = await stream.finalMessage();
+          // 记忆检索改为工具化调用，不在此自动注入
 
-          // 解析响应
-          const assistantContent: ContentBlock[] = [];
-          const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
-          const turnTextParts: string[] = [];
+          // ===== Heartbeat 任务注入 =====
+          if (this.enableHeartbeat) {
+            const tasksPrompt = await this.heartbeat.buildTasksPrompt();
+            if (tasksPrompt) {
+              processedMessage += tasksPrompt;
+            }
+          }
 
-          for (const block of response.content) {
-            if (block.type === "text") {
-              turnTextParts.push(block.text);
-              assistantContent.push({ type: "text", text: block.text });
-            } else if (block.type === "tool_use") {
-              callbacks?.onToolStart?.(block.name, block.input);
+          // 添加用户消息
+          const userMsg: Message = {
+            role: "user",
+            content: processedMessage,
+            timestamp: Date.now(),
+          };
+          await this.sessions.append(sessionKey, userMsg);
+
+          let turns = 0;
+          let totalToolCalls = 0;
+          let finalText = "";
+          const currentMessages = [...history, userMsg];
+          const prep = await this.prepareMessagesForRun({
+            messages: currentMessages,
+            sessionKey,
+            runId,
+          });
+          let compactionSummary = prep.summaryMessage;
+          let cachedPrune = prep.pruned;
+          let usedInitialPrune = false;
+
+          // 构建系统提示
+          const systemPrompt = await this.buildSystemPrompt({ sessionKey });
+          const toolsForRun = this.resolveToolsForRun();
+
+          // ===== Agent Loop =====
+          while (turns < this.maxTurns) {
+            turns++;
+            callbacks?.onTurnStart?.(turns);
+
+            const pruneResult = usedInitialPrune
+              ? pruneContextMessages({
+                messages: currentMessages,
+                contextWindowTokens: this.contextTokens,
+              })
+              : cachedPrune;
+            usedInitialPrune = true;
+            cachedPrune = pruneResult;
+            let messagesForModel = pruneResult.messages;
+            if (compactionSummary) {
+              messagesForModel = [compactionSummary, ...messagesForModel];
+            }
+
+            // 调用 LLM (流式)
+            const stream = this.client.messages.stream({
+              model: this.model,
+              max_tokens: 4096,
+              system: systemPrompt,
+              tools: toolsForRun.map((t) => ({
+                name: t.name,
+                description: t.description,
+                input_schema: t.inputSchema,
+              })),
+              messages: messagesForModel.map((m) => ({
+                role: m.role,
+                content: m.content,
+              })) as Anthropic.MessageParam[],
+            });
+
+            // 处理流式响应
+            for await (const event of stream) {
+              if (event.type === "content_block_delta") {
+                if (event.delta.type === "text_delta") {
+                  callbacks?.onTextDelta?.(event.delta.text);
+                  emitAgentEvent({
+                    runId,
+                    stream: "assistant",
+                    sessionKey,
+                    agentId: this.agentId,
+                    data: {
+                      delta: event.delta.text,
+                    },
+                  });
+                }
+              }
+            }
+
+            // 获取完整响应
+            const response = await stream.finalMessage();
+
+            // 解析响应
+            const assistantContent: ContentBlock[] = [];
+            const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
+            const turnTextParts: string[] = [];
+
+            for (const block of response.content) {
+              if (block.type === "text") {
+                turnTextParts.push(block.text);
+                assistantContent.push({ type: "text", text: block.text });
+              } else if (block.type === "tool_use") {
+                callbacks?.onToolStart?.(block.name, block.input);
+                emitAgentEvent({
+                  runId,
+                  stream: "tool",
+                  sessionKey,
+                  agentId: this.agentId,
+                  data: {
+                    phase: "start",
+                    name: block.name,
+                    input: block.input,
+                  },
+                });
+                assistantContent.push({
+                  type: "tool_use",
+                  id: block.id,
+                  name: block.name,
+                  input: block.input as Record<string, unknown>,
+                });
+                toolCalls.push({
+                  id: block.id,
+                  name: block.name,
+                  input: block.input as Record<string, unknown>,
+                });
+              }
+            }
+
+            // 保存 assistant 消息
+            const assistantMsg: Message = {
+              role: "assistant",
+              content: assistantContent,
+              timestamp: Date.now(),
+            };
+            await this.sessions.append(sessionKey, assistantMsg);
+            currentMessages.push(assistantMsg);
+
+            callbacks?.onTurnEnd?.(turns);
+
+            const turnText = turnTextParts.join("");
+            if (turnText) {
+              callbacks?.onTextComplete?.(turnText);
+              emitAgentEvent({
+                runId,
+                stream: "assistant",
+                sessionKey,
+                agentId: this.agentId,
+                data: {
+                  text: turnText,
+                  final: true,
+                },
+              });
+            }
+
+            // 没有工具调用，结束
+            if (toolCalls.length === 0) {
+              finalText = turnText;
+              break;
+            }
+
+            // 执行工具
+            totalToolCalls += toolCalls.length;
+            const toolResults: ContentBlock[] = [];
+
+            for (const call of toolCalls) {
+              const tool = toolsForRun.find((t) => t.name === call.name);
+              let result: string;
+
+              if (tool) {
+                try {
+                  result = await tool.execute(call.input, toolCtx);
+                } catch (err) {
+                  result = `执行错误: ${(err as Error).message}`;
+                }
+              } else {
+                result = `未知工具: ${call.name}`;
+              }
+
+              callbacks?.onToolEnd?.(call.name, result);
               emitAgentEvent({
                 runId,
                 stream: "tool",
                 sessionKey,
                 agentId: this.agentId,
                 data: {
-                  phase: "start",
-                  name: block.name,
-                  input: block.input,
+                  phase: "end",
+                  name: call.name,
+                  output: result.length > 500 ? `${result.slice(0, 500)}...` : result,
                 },
               });
-              assistantContent.push({
-                type: "tool_use",
-                id: block.id,
-                name: block.name,
-                input: block.input as Record<string, unknown>,
-              });
-              toolCalls.push({
-                id: block.id,
-                name: block.name,
-                input: block.input as Record<string, unknown>,
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: call.id,
+                content: result,
               });
             }
+
+            // 添加工具结果
+            const resultMsg: Message = {
+              role: "user",
+              content: toolResults,
+              timestamp: Date.now(),
+            };
+            await this.sessions.append(sessionKey, resultMsg);
+            currentMessages.push(resultMsg);
           }
 
-          // 保存 assistant 消息
-          const assistantMsg: Message = {
-            role: "assistant",
-            content: assistantContent,
-            timestamp: Date.now(),
-          };
-          await this.sessions.append(sessionKey, assistantMsg);
-          currentMessages.push(assistantMsg);
-
-          callbacks?.onTurnEnd?.(turns);
-
-          const turnText = turnTextParts.join("");
-          if (turnText) {
-            callbacks?.onTextComplete?.(turnText);
-            emitAgentEvent({
-              runId,
-              stream: "assistant",
-              sessionKey,
-              agentId: this.agentId,
-              data: {
-                text: turnText,
-                final: true,
-              },
-            });
+          // ===== 保存到记忆 =====
+          if (this.enableMemory && finalText) {
+            await this.memory.add(
+              `Q: ${userMessage}\nA: ${finalText.slice(0, 500)}`,
+              "agent",
+              [sessionKey],
+            );
           }
 
-          // 没有工具调用，结束
-          if (toolCalls.length === 0) {
-            finalText = turnText;
-            break;
-          }
+          const endedAt = Date.now();
+          emitAgentEvent({
+            runId,
+            stream: "lifecycle",
+            sessionKey,
+            agentId: this.agentId,
+            data: {
+              phase: "end",
+              startedAt,
+              endedAt,
+              turns,
+              toolCalls: totalToolCalls,
+            },
+          });
 
-          // 执行工具
-          totalToolCalls += toolCalls.length;
-          const toolResults: ContentBlock[] = [];
-
-          for (const call of toolCalls) {
-            const tool = toolsForRun.find((t) => t.name === call.name);
-            let result: string;
-
-            if (tool) {
-              try {
-                result = await tool.execute(call.input, toolCtx);
-              } catch (err) {
-                result = `执行错误: ${(err as Error).message}`;
-              }
-            } else {
-              result = `未知工具: ${call.name}`;
-            }
-
-            callbacks?.onToolEnd?.(call.name, result);
-            emitAgentEvent({
-              runId,
-              stream: "tool",
-              sessionKey,
-              agentId: this.agentId,
-              data: {
-                phase: "end",
-                name: call.name,
-                output: result.length > 500 ? `${result.slice(0, 500)}...` : result,
-              },
-            });
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: call.id,
-              content: result,
-            });
-          }
-
-          // 添加工具结果
-          const resultMsg: Message = {
-            role: "user",
-            content: toolResults,
-            timestamp: Date.now(),
-          };
-          await this.sessions.append(sessionKey, resultMsg);
-          currentMessages.push(resultMsg);
-        }
-
-        // ===== 保存到记忆 =====
-        if (this.enableMemory && finalText) {
-          await this.memory.add(
-            `Q: ${userMessage}\nA: ${finalText.slice(0, 500)}`,
-            "agent",
-            [sessionKey],
-          );
-        }
-
-        const endedAt = Date.now();
-        emitAgentEvent({
-          runId,
-          stream: "lifecycle",
-          sessionKey,
-          agentId: this.agentId,
-          data: {
-            phase: "end",
-            startedAt,
-            endedAt,
+          return {
+            runId,
+            text: finalText,
             turns,
             toolCalls: totalToolCalls,
-          },
-        });
-
-        return {
-          runId,
-          text: finalText,
-          turns,
-          toolCalls: totalToolCalls,
-          skillTriggered,
-          memoriesUsed,
-        };
+            skillTriggered,
+            memoriesUsed,
+          };
         } catch (err) {
           emitAgentEvent({
             runId,

@@ -15,7 +15,8 @@
     "example": "tsx examples/basic.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0"
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^17.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

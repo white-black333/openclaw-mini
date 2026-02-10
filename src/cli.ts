@@ -3,6 +3,7 @@
  * Mini Agent CLI
  */
 
+import "dotenv/config";
 import readline from "node:readline";
 import { Agent, onAgentEvent } from "./index.js";
 import { resolveSessionKey } from "./session-key.js";
@@ -332,12 +333,12 @@ async function handleCommand(cmd: string, agent: Agent, sessionKey: string) {
   }
 }
 
-  // 处理 Ctrl+C
-  process.on("SIGINT", () => {
-    console.log(color("\n\n再见! 👋", "cyan"));
-    unsubscribe?.();
-    process.exit(0);
-  });
+// 处理 Ctrl+C
+process.on("SIGINT", () => {
+  console.log(color("\n\n再见! 👋", "cyan"));
+  unsubscribe?.();
+  process.exit(0);
+});
 
 main().catch((err) => {
   console.error("启动失败:", err);
